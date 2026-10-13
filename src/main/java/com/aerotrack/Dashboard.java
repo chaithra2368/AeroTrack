@@ -243,21 +243,89 @@ public class Dashboard extends JFrame {
 
     private JPanel databaseTab() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
-        JTextArea output = new JTextArea();
-        output.setEditable(false);
-        JButton refresh = new JButton("Read database counts");
-        refresh.addActionListener(e -> {
+        panel.setBorder(new EmptyBorder(8, 8, 8, 8));
+        JTabbedPane workspace = new JTabbedPane();
+
+        // Overview: live counts are read directly from MySQL, not hardcoded.
+        JPanel overview = new JPanel(new BorderLayout(8, 8));
+        JTextArea overviewText = new JTextArea("Database workspace\n\nClick Refresh to read current row counts from MySQL.");
+        overviewText.setEditable(false);
+        overviewText.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 14));
+        JButton refreshCounts = new JButton("Refresh database counts");
+        refreshCounts.addActionListener(e -> {
             try {
                 long[] counts = database.databaseCounts();
-                output.setText("These values are queried from MySQL right now.\n\n"
-                        + "flights: " + counts[0] + "\ntelemetry: " + counts[1]
-                        + "\nevents: " + counts[2] + "\napp_users: " + counts[3]
-                        + "\n\nThe dashboard is not the database. Every packet is inserted into telemetry; anomaly records are inserted into events.");
+                overviewText.setText("Connected database: rocket_telemetry\n\n"
+                        + "flights       : " + counts[0] + "\n"
+                        + "telemetry     : " + counts[1] + "\n"
+                        + "events        : " + counts[2] + "\n"
+                        + "app_users     : " + counts[3] + "\n\n"
+                        + "Each simulated packet is inserted into telemetry.\n"
+                        + "Anomaly findings are saved in events in the same transaction.\n"
+                        + "Table counts are fetched live from MySQL.");
             } catch (Exception ex) { showError(ex); }
         });
-        panel.add(refresh, BorderLayout.NORTH);
-        panel.add(new JScrollPane(output), BorderLayout.CENTER);
+        overview.add(refreshCounts, BorderLayout.NORTH);
+        overview.add(new JScrollPane(overviewText), BorderLayout.CENTER);
+        workspace.addTab("Overview", overview);
+
+        // Table explorer: real records and real schema metadata.
+        JPanel explorer = new JPanel(new BorderLayout(6, 6));
+        JPanel explorerControls = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JComboBox<String> tableChoice = new JComboBox<>(new String[]{"flights", "telemetry", "events", "app_users"});
+        JComboBox<String> viewChoice = new JComboBox<>(new String[]{"Records (latest 200)", "Column definitions"});
+        JButton loadTable = new JButton("Load table");
+        DefaultTableModel explorerModel = model("Result");
+        JTable explorerTable = new JTable(explorerModel);
+        explorerTable.setAutoCreateRowSorter(true);
+        explorerControls.add(new JLabel("Table")); explorerControls.add(tableChoice);
+        explorerControls.add(new JLabel("View")); explorerControls.add(viewChoice); explorerControls.add(loadTable);
+        loadTable.addActionListener(e -> {
+            try {
+                Database.TableData data = "Column definitions".equals(viewChoice.getSelectedItem())
+                        ? database.inspectColumns((String) tableChoice.getSelectedItem())
+                        : database.inspectTable((String) tableChoice.getSelectedItem());
+                setTableData(explorerModel, data);
+            } catch (Exception ex) { showError(ex); }
+        });
+        explorer.add(explorerControls, BorderLayout.NORTH);
+        explorer.add(new JScrollPane(explorerTable), BorderLayout.CENTER);
+        workspace.addTab("Table explorer", explorer);
+
+        // Predefined read-only SQL analytics make joins and aggregates visible without unsafe free-form SQL.
+        JPanel analytics = new JPanel(new BorderLayout(6, 6));
+        JPanel analyticsControls = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JComboBox<String> reportChoice = new JComboBox<>(new String[]{"Flight summary", "Anomalies by flight",
+                "High temperature packets", "Low battery packets", "Flight state distribution", "Flights with no telemetry"});
+        JButton runReport = new JButton("Run SQL report");
+        DefaultTableModel reportModel = model("Result");
+        JTable reportTable = new JTable(reportModel);
+        reportTable.setAutoCreateRowSorter(true);
+        analyticsControls.add(new JLabel("Report")); analyticsControls.add(reportChoice); analyticsControls.add(runReport);
+        runReport.addActionListener(e -> {
+            try { setTableData(reportModel, database.runAnalytics((String) reportChoice.getSelectedItem())); }
+            catch (Exception ex) { showError(ex); }
+        });
+        analytics.add(analyticsControls, BorderLayout.NORTH);
+        analytics.add(new JScrollPane(reportTable), BorderLayout.CENTER);
+        workspace.addTab("SQL analytics", analytics);
+
+        JTextArea footer = new JTextArea("DBMS concepts demonstrated with live MySQL data: SELECT, JOIN, GROUP BY, aggregate functions, "
+                + "LEFT JOIN, primary/foreign-key relationships, schema metadata, JDBC, and transactional packet/event inserts. "
+                + "Reports are read-only and use predefined SQL.");
+        footer.setEditable(false); footer.setLineWrap(true); footer.setWrapStyleWord(true);
+        footer.setRows(2);
+        panel.add(workspace, BorderLayout.CENTER);
+        panel.add(footer, BorderLayout.SOUTH);
         return panel;
+    }
+
+    private void setTableData(DefaultTableModel model, Database.TableData data) {
+        model.setRowCount(0);
+        model.setColumnCount(0);
+        for (String column : data.columns()) model.addColumn(column);
+        for (Object[] row : data.rows()) model.addRow(row);
+        status.setText("Database query complete: " + data.rows().size() + " row(s) returned.");
     }
 
     private JPanel card(String title, JLabel value) {

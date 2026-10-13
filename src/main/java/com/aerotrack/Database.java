@@ -262,6 +262,77 @@ public class Database {
         }
     }
 
+
+    /** Read-only result container used by the Database workspace. */
+    public record TableData(String[] columns, List<Object[]> rows) { }
+
+    private static final List<String> SAFE_TABLES = List.of("flights", "telemetry", "events", "app_users");
+
+    /** Shows real rows from a known project table. Password hashes are never displayed. */
+    public TableData inspectTable(String tableName) throws SQLException {
+        if (!SAFE_TABLES.contains(tableName)) throw new IllegalArgumentException("Unknown table");
+        String sql = switch (tableName) {
+            case "flights" -> "SELECT flight_id,flight_name,scenario,status,start_time,end_time FROM flights ORDER BY flight_id DESC LIMIT 200";
+            case "telemetry" -> "SELECT telemetry_id,flight_id,packet_no,recorded_at,altitude,velocity,temperature,battery_voltage,latitude,longitude,flight_state FROM telemetry ORDER BY telemetry_id DESC LIMIT 200";
+            case "events" -> "SELECT event_id,flight_id,telemetry_id,event_time,event_type,severity,message,observed_value FROM events ORDER BY event_id DESC LIMIT 200";
+            case "app_users" -> "SELECT username,role,created_at FROM app_users ORDER BY username";
+            default -> throw new IllegalArgumentException("Unknown table");
+        };
+        return runReadOnlyQuery(sql);
+    }
+
+    /** Returns column definitions and key information from MySQL metadata. */
+    public TableData inspectColumns(String tableName) throws SQLException {
+        if (!SAFE_TABLES.contains(tableName)) throw new IllegalArgumentException("Unknown table");
+        String sql = "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT " +
+                "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION";
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Object[]> rows = new ArrayList<>();
+                while (rs.next()) rows.add(new Object[]{rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getObject(5)});
+                return new TableData(new String[]{"Column", "Type", "Nullable", "Key", "Default"}, rows);
+            }
+        }
+    }
+
+    /** Read-only, predefined analytics. SQL is intentionally not accepted from arbitrary UI input. */
+    public TableData runAnalytics(String reportName) throws SQLException {
+        String sql = switch (reportName) {
+            case "Flight summary" -> "SELECT f.flight_id, f.flight_name, f.status, COUNT(t.telemetry_id) AS packets, " +
+                    "ROUND(MAX(t.altitude),2) AS max_altitude, ROUND(AVG(t.temperature),2) AS avg_temperature, " +
+                    "ROUND(MIN(t.battery_voltage),2) AS min_battery FROM flights f LEFT JOIN telemetry t " +
+                    "ON t.flight_id=f.flight_id GROUP BY f.flight_id,f.flight_name,f.status ORDER BY f.flight_id DESC LIMIT 100";
+            case "Anomalies by flight" -> "SELECT f.flight_id, f.flight_name, e.severity, COUNT(e.event_id) AS event_count " +
+                    "FROM flights f JOIN events e ON e.flight_id=f.flight_id GROUP BY f.flight_id,f.flight_name,e.severity " +
+                    "ORDER BY f.flight_id DESC,e.severity";
+            case "High temperature packets" -> "SELECT flight_id,packet_no,recorded_at,temperature,battery_voltage FROM telemetry " +
+                    "WHERE temperature > 35 ORDER BY temperature DESC LIMIT 200";
+            case "Low battery packets" -> "SELECT flight_id,packet_no,recorded_at,temperature,battery_voltage FROM telemetry " +
+                    "WHERE battery_voltage < 11 ORDER BY battery_voltage ASC LIMIT 200";
+            case "Flight state distribution" -> "SELECT flight_state,COUNT(*) AS packet_count FROM telemetry GROUP BY flight_state ORDER BY packet_count DESC";
+            case "Flights with no telemetry" -> "SELECT f.flight_id,f.flight_name,f.status FROM flights f LEFT JOIN telemetry t " +
+                    "ON t.flight_id=f.flight_id WHERE t.telemetry_id IS NULL ORDER BY f.flight_id DESC";
+            default -> throw new IllegalArgumentException("Choose one of the available reports.");
+        };
+        return runReadOnlyQuery(sql);
+    }
+
+    private TableData runReadOnlyQuery(String sql) throws SQLException {
+        try (Connection c = connect(); Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            ResultSetMetaData meta = rs.getMetaData();
+            String[] columns = new String[meta.getColumnCount()];
+            for (int i = 0; i < columns.length; i++) columns[i] = meta.getColumnLabel(i + 1);
+            List<Object[]> rows = new ArrayList<>();
+            while (rs.next()) {
+                Object[] row = new Object[columns.length];
+                for (int i = 0; i < columns.length; i++) row[i] = rs.getObject(i + 1);
+                rows.add(row);
+            }
+            return new TableData(columns, rows);
+        }
+    }
+
     public long[] databaseCounts() throws SQLException {
         return new long[]{count("flights"), count("telemetry"), count("events"), count("app_users")};
     }
